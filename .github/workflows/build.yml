@@ -1,90 +1,151 @@
-name: nightly
+name: Build and release
 
 on:
   push:
-    branches:
-      - main
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Finish an active release; keep only the newest queued push for this branch.
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
+    if: github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
     steps:
-      - name: Checkout repo
+      - name: Check out source and full Git history
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Setup build JDKs
+      - name: Set up JDKs
         uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
+          distribution: zulu
           java-version: |
             17
             21
-          cache: 'gradle'
+          cache: gradle
 
-      - name: Setup Android SDK
+      - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android platform
+      - name: Install Android platform and build tools
         run: sdkmanager "platforms;android-37.0" "build-tools;36.0.0"
 
-      - name: Setup Node for offline protocol tests
+      - name: Set up Node
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
-      - name: Verify extension
+      - name: Prepare release metadata
+        id: metadata
+        shell: bash
         run: |
+          set -euo pipefail
           chmod +x ./gradlew
-          ./gradlew :ext:test :ext:ktlintCheck
+          revision=$(git rev-parse HEAD)
+          version="v${revision:0:7}"
+          version_code=$(git rev-list --count HEAD)
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          mkdir -p build/release
+          printf '# YouTube Music %s\n\nCommit: %s\nVersion code: %s\n\n' \
+            "$version" "$revision" "$version_code" > build/release/release-notes.md
+          git log -1 --format=%B >> build/release/release-notes.md
+          printf '\nImport youtubemusic.eapk through Echo to install this build.\n' \
+            >> build/release/release-notes.md
+
+      - name: Check source and offline tests
+        run: |
+          ./gradlew --no-daemon :ext:ktlintCheck :ext:test
           node --test ext/src/test/js/botguard.test.cjs
 
-      - name: Cook Variables from gradle.properties
-        run : |
-          name=$(grep '^extName=' gradle.properties | cut -d'=' -f2)
-          echo "NAME=$name Extension" >> $GITHUB_ENV
-          id=$(grep '^extId=' gradle.properties | cut -d'=' -f2)
-          echo "TAG=$id" >> $GITHUB_ENV
-
-      - name: Make Environment
+      - name: Build extension
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || secrets.PASSWORD }}
+          KEY_ALIAS: ${{ vars.SIGNING_KEY_ALIAS || 'key0' }}
         run: |
-          version=$( echo ${{ github.event.head_commit.id }} | cut -c1-7 )
-          echo "VERSION=v$version" >> $GITHUB_ENV
-          echo -e "## ${{ env.NAME }}\n${{ github.event.head_commit.message }}" > commit.txt
-          echo "APP_PATH=app/build/${{ env.TAG }}-$version.eapk" >> $GITHUB_ENV
-          echo "${{ secrets.KEYSTORE_B64 }}" | base64 -d > $GITHUB_WORKSPACE/signing-key.jks
-          chmod +x ./gradlew
+          set -euo pipefail
+          signing_args=()
+          if [[ -n "$KEYSTORE_B64" ]]; then
+            if [[ -z "$KEYSTORE_PASSWORD" || -z "$KEY_PASSWORD" ]]; then
+              printf '::error::Set PASSWORD when KEYSTORE_B64 is configured.\n'
+              exit 1
+            fi
+            signing_file="$RUNNER_TEMP/signing-key.jks"
+            trap 'rm -f "$signing_file"' EXIT
+            printf '%s' "$KEYSTORE_B64" | base64 --decode > "$signing_file"
+            chmod 600 "$signing_file"
+            signing_args=(
+              "-Pandroid.injected.signing.store.file=$signing_file"
+              "-Pandroid.injected.signing.store.password=$KEYSTORE_PASSWORD"
+              "-Pandroid.injected.signing.key.alias=$KEY_ALIAS"
+              "-Pandroid.injected.signing.key.password=$KEY_PASSWORD"
+            )
+          fi
+          ./gradlew --no-daemon :app:clean :app:assembleDebug "${signing_args[@]}"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify app/build/outputs/apk/debug/app-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk build/release/youtubemusic.eapk
+          cp app/build/outputs/apk/debug/app-debug.apk build/release/youtubemusic.apk
 
-      - name: Build with Gradle
-        run: |
-          ./gradlew assembleDebug \
-          -Pandroid.injected.signing.store.file=$GITHUB_WORKSPACE/signing-key.jks \
-          -Pandroid.injected.signing.store.password=${{ secrets.PASSWORD }} \
-          -Pandroid.injected.signing.key.alias=key0 \
-          -Pandroid.injected.signing.key.password=${{ secrets.PASSWORD }}
-          
-          cp app/build/outputs/apk/debug/app-debug.apk ${{ env.APP_PATH }}
-
-      - name: Upload APK
+      - name: Save release files
         uses: actions/upload-artifact@v4
         with:
-          path: ${{ env.APP_PATH }}
+          name: extension-${{ github.sha }}
+          path: build/release/*
+          if-no-files-found: error
+          retention-days: 7
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified build
+        uses: actions/download-artifact@v4
         with:
-          make_latest: true
-          tag_name: ${{ env.VERSION }}
-          body_path: commit.txt
-          name: ${{ env.VERSION }}
-          files: ${{ env.APP_PATH }}
+          name: extension-${{ github.sha }}
+          path: release
 
-      - name: Delete Old Releases
-        uses: sgpublic/delete-release-action@master
-        with:
-          release-drop: true
-          release-keep-count: 2
-          release-drop-tag: true
+      - name: Publish latest release
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          latest_sha=$(gh api "repos/$GH_REPO/git/ref/heads/$RELEASE_BRANCH" --jq '.object.sha')
+          if [[ "$latest_sha" != "$RELEASE_SHA" ]]; then
+            printf 'Skipping release: a newer commit is already on %s.\n' "$RELEASE_BRANCH"
+            exit 0
+          fi
+          if ! gh release view "$RELEASE_VERSION" > /dev/null 2>&1; then
+            gh release create "$RELEASE_VERSION" \
+              --target "$RELEASE_SHA" --draft \
+              --title "YouTube Music $RELEASE_VERSION" \
+              --notes-file release/release-notes.md
+          fi
+          gh release upload "$RELEASE_VERSION" \
+            release/youtubemusic.eapk release/youtubemusic.apk --clobber
+          # Make it public and latest only after both assets have uploaded.
+          gh release edit "$RELEASE_VERSION" --draft=false --prerelease=false --latest \
+            --title "YouTube Music $RELEASE_VERSION" \
+            --notes-file release/release-notes.md
+          gh release view "$RELEASE_VERSION" --json url --jq .url >> "$GITHUB_STEP_SUMMARY"
