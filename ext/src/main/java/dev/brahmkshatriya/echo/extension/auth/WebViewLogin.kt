@@ -14,6 +14,10 @@ import java.net.URI
 class YouTubeMusicWebViewLogin :
     WebViewRequest.Cookie<List<User>>,
     WebViewRequest.Headers<List<User>> {
+    // Implement defaults locally for compatibility with Echo's Android interface.
+    override val maxTimeout = 15_000L
+    override val dontCache = false
+
     override val initialUrl =
         NetworkRequest(
             LOGIN_URL,

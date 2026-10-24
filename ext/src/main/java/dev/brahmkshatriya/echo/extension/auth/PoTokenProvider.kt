@@ -214,6 +214,10 @@ internal class PoTokenWebViewRequest(
 
     // RPCs are POSTs; allow normal HTTP caching for the hash-addressed interpreter.
     override val dontCache = false
+
+    // Echo's Android interface can lack the JVM default body. Keep this getter local
+    // so onPageStarted cannot dispatch to an abstract method in the host.
+    override val javascriptToEvaluateOnPageStart: String? = null
     override val javascriptToEvaluate =
         "async function() {\n" +
             "const videoId = ${JsonPrimitive(videoId)};\nconst visitorData = ${JsonPrimitive(visitorData)};\n" +
