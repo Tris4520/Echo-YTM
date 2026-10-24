@@ -1,0 +1,6 @@
+jdk:
+  - openjdk21
+before_install:
+  - sdk install java 17.0.1-open
+install:
+  - ./gradlew clean ext:assemble publishToMavenLocal
