@@ -57,14 +57,6 @@ For Android, import the APK through Echo's extension installer; if it filters fo
 Android DEX package. This project packages an extension and has no standalone
 player or sign-in activity.
 
-## Versioning
-
-
 ## Sources and license
-
-Source was inspected through local shallow clones in the ignored `.reference/`
-directory, without GitHub authentication. The build uses the published dependencies.
-`gittokenforu.properties` is ignored and is not an extension resource.
-
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), [LICENSE](LICENSE) and
 [DISCLAIMER.md](DISCLAIMER.md). The extension is independent of YouTube and Google.
